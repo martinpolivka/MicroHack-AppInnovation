@@ -1,13 +1,13 @@
 package com.microsoft.microhack.catalog.service;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.core.JsonToken;
-import com.fasterxml.jackson.core.StreamReadFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JsonParser;
+import tools.jackson.core.JsonToken;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.json.JsonMapper;
 import com.microsoft.microhack.catalog.model.CatalogImportItem;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
 import java.util.ArrayList;
@@ -25,12 +25,13 @@ public class CatalogDocumentParser {
 
     private static final Pattern CANONICAL_UUID = Pattern.compile(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
-    private final ObjectMapper objectMapper;
+    private final JsonMapper objectMapper;
     private final Validator validator;
 
-    public CatalogDocumentParser(ObjectMapper objectMapper, Validator validator) {
-        this.objectMapper = objectMapper.copy()
-                .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION.mappedFeature());
+    public CatalogDocumentParser(JsonMapper objectMapper, Validator validator) {
+        this.objectMapper = objectMapper.rebuild()
+                .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+                .build();
         this.validator = validator;
     }
 
@@ -56,7 +57,7 @@ public class CatalogDocumentParser {
     }
 
     private List<CatalogImportItem> readDocument(InputStream input) {
-        try (JsonParser parser = objectMapper.getFactory().createParser(input)) {
+        try (JsonParser parser = objectMapper.createParser(input)) {
             if (parser.nextToken() != JsonToken.START_ARRAY) {
                 throw new CatalogImportValidationException(
                         "catalog document root must be one JSON array");
@@ -74,7 +75,7 @@ public class CatalogDocumentParser {
                         "catalog document must contain exactly one JSON root");
             }
             return records;
-        } catch (IOException exception) {
+        } catch (JacksonException exception) {
             throw new CatalogImportValidationException("catalog document is not valid JSON", exception);
         } catch (CatalogImportValidationException exception) {
             throw exception;
@@ -83,10 +84,10 @@ public class CatalogDocumentParser {
         }
     }
 
-    private CatalogImportItem readItem(JsonParser parser) throws IOException {
+    private CatalogImportItem readItem(JsonParser parser) {
         Map<String, String> fields = new HashMap<>();
         while (parser.nextToken() != JsonToken.END_OBJECT) {
-            if (parser.currentToken() != JsonToken.FIELD_NAME) {
+            if (parser.currentToken() != JsonToken.PROPERTY_NAME) {
                 throw new CatalogImportValidationException("catalog object contains an invalid token");
             }
             String field = parser.currentName();
@@ -97,7 +98,7 @@ public class CatalogDocumentParser {
                 throw new CatalogImportValidationException(
                         "catalog field " + field + " must be a JSON string");
             }
-            fields.put(field, parser.getText());
+            fields.put(field, parser.getString());
         }
         return new CatalogImportItem(
                 required(fields, "productId"),

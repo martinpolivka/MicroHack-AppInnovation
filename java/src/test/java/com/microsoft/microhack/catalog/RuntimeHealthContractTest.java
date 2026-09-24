@@ -5,7 +5,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import com.microsoft.microhack.catalog.config.CatalogRuntimeOptions;
 import com.microsoft.microhack.catalog.repository.CategoryRepository;
 import com.microsoft.microhack.catalog.repository.FigureRepository;
@@ -103,7 +103,7 @@ class RuntimeHealthContractTest {
         CatalogImportService imports = new CatalogImportService(
                 new CatalogImportTransactionWorker(
                         new CatalogDocumentParser(
-                                new ObjectMapper(),
+                                JsonMapper.builder().build(),
                                 Validation.buildDefaultValidatorFactory().getValidator()),
                         figures,
                         categories),

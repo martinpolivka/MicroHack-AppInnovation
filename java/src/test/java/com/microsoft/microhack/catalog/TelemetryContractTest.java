@@ -9,7 +9,7 @@ import static org.mockito.Mockito.when;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.joran.JoranConfigurator;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import com.microsoft.microhack.catalog.config.CatalogResourceIdentity;
 import com.microsoft.microhack.catalog.config.CatalogRuntimeOptions;
 import com.microsoft.microhack.catalog.repository.CategoryRepository;
@@ -414,7 +414,7 @@ class TelemetryContractTest {
         return new CatalogImportService(
                 new CatalogImportTransactionWorker(
                         new CatalogDocumentParser(
-                                new ObjectMapper(),
+                                JsonMapper.builder().build(),
                                 Validation.buildDefaultValidatorFactory().getValidator()),
                         figures,
                         categories),

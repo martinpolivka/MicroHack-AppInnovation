@@ -1,0 +1,956 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.46.1.21595",
+      "templateHash": "7957621034359746881"
+    }
+  },
+  "parameters": {
+    "serverNamePrefix": {
+      "type": "string",
+      "defaultValue": "microhack-pg",
+      "minLength": 3,
+      "maxLength": 49,
+      "metadata": {
+        "description": "Prefix for the globally unique PostgreSQL server name."
+      }
+    },
+    "administratorLogin": {
+      "type": "string",
+      "metadata": {
+        "description": "PostgreSQL administrator login name."
+      }
+    },
+    "administratorLoginPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "PostgreSQL administrator password."
+      }
+    },
+    "clientIpAddress": {
+      "type": "string",
+      "metadata": {
+        "description": "Client IPv4 address allowed through the PostgreSQL firewall."
+      }
+    },
+    "postgresqlVersion": {
+      "type": "string",
+      "defaultValue": "16",
+      "allowedValues": [
+        "16",
+        "17",
+        "18"
+      ],
+      "metadata": {
+        "description": "PostgreSQL major version."
+      }
+    },
+    "containerRegistrySku": {
+      "type": "string",
+      "defaultValue": "Basic",
+      "allowedValues": [
+        "Basic",
+        "Standard",
+        "Premium"
+      ],
+      "metadata": {
+        "description": "Azure Container Registry SKU."
+      }
+    },
+    "containerImageName": {
+      "type": "string",
+      "defaultValue": "lego-catalog/app:latest",
+      "metadata": {
+        "description": "Container image repository and tag in the deployed registry."
+      }
+    },
+    "performanceApiKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "API key required by the performance test endpoint."
+      }
+    },
+    "otelExporterOtlpEndpoint": {
+      "type": "string",
+      "defaultValue": "http://localhost:4317",
+      "metadata": {
+        "description": "OpenTelemetry OTLP endpoint used by the application."
+      }
+    },
+    "deployContainerApp": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the Container App after its image and data are available."
+      }
+    },
+    "githubRepository": {
+      "type": "string",
+      "metadata": {
+        "description": "GitHub repository allowed to federate with the deployment identity, in owner/name format."
+      }
+    }
+  },
+  "variables": {
+    "serverName": "[format('{0}-{1}', parameters('serverNamePrefix'), uniqueString(resourceGroup().id))]",
+    "containerRegistryName": "[format('microhackacr{0}', uniqueString(resourceGroup().id))]",
+    "storageAccountName": "[format('mhcatalog{0}', uniqueString(resourceGroup().id))]",
+    "managedEnvironmentName": "mh-catalog-environment",
+    "containerAppName": "mh-catalog",
+    "loadTestName": "[format('mh-loadtest-{0}', uniqueString(resourceGroup().id))]",
+    "workloadProfileName": "Consumption",
+    "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+    "contributorRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]"
+  },
+  "resources": {
+    "postgresqlServer": {
+      "type": "Microsoft.DBforPostgreSQL/flexibleServers",
+      "apiVersion": "2024-08-01",
+      "name": "[variables('serverName')]",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "name": "Standard_B1ms",
+        "tier": "Burstable"
+      },
+      "properties": {
+        "administratorLogin": "[parameters('administratorLogin')]",
+        "administratorLoginPassword": "[parameters('administratorLoginPassword')]",
+        "version": "[parameters('postgresqlVersion')]",
+        "network": {
+          "publicNetworkAccess": "Enabled"
+        },
+        "storage": {
+          "storageSizeGB": 32
+        }
+      }
+    },
+    "clientFirewallRule": {
+      "type": "Microsoft.DBforPostgreSQL/flexibleServers/firewallRules",
+      "apiVersion": "2024-08-01",
+      "name": "[format('{0}/{1}', variables('serverName'), 'AllowClientIp')]",
+      "properties": {
+        "startIpAddress": "[parameters('clientIpAddress')]",
+        "endIpAddress": "[parameters('clientIpAddress')]"
+      },
+      "dependsOn": [
+        "postgresqlServer"
+      ]
+    },
+    "azureServicesFirewallRule": {
+      "type": "Microsoft.DBforPostgreSQL/flexibleServers/firewallRules",
+      "apiVersion": "2024-08-01",
+      "name": "[format('{0}/{1}', variables('serverName'), 'AllowAzureServices')]",
+      "properties": {
+        "startIpAddress": "0.0.0.0",
+        "endIpAddress": "0.0.0.0"
+      },
+      "dependsOn": [
+        "postgresqlServer"
+      ]
+    },
+    "containerRegistry": {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2025-04-01",
+      "name": "[variables('containerRegistryName')]",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "name": "[parameters('containerRegistrySku')]"
+      }
+    },
+    "containerAppIdentity": {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "mh-catalog-identity",
+      "location": "[resourceGroup().location]"
+    },
+    "acrPullRoleAssignment": {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'mh-catalog-identity'), variables('acrPullRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[reference('containerAppIdentity').principalId]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[variables('acrPullRoleDefinitionId')]"
+      },
+      "dependsOn": [
+        "containerAppIdentity",
+        "containerRegistry"
+      ]
+    },
+    "githubActionsIdentity": {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2024-11-30",
+      "name": "mh-github-actions-identity",
+      "location": "[resourceGroup().location]"
+    },
+    "githubMainFederatedCredential": {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+      "apiVersion": "2024-11-30",
+      "name": "[format('{0}/{1}', 'mh-github-actions-identity', 'github-main')]",
+      "properties": {
+        "audiences": [
+          "api://AzureADTokenExchange"
+        ],
+        "issuer": "https://token.actions.githubusercontent.com",
+        "subject": "[format('repo:{0}:ref:refs/heads/main', parameters('githubRepository'))]"
+      },
+      "dependsOn": [
+        "githubActionsIdentity"
+      ]
+    },
+    "githubActionsContributorRoleAssignment": {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(resourceGroup().id, resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'mh-github-actions-identity'), variables('contributorRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[reference('githubActionsIdentity').principalId]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[variables('contributorRoleDefinitionId')]"
+      },
+      "dependsOn": [
+        "githubActionsIdentity"
+      ]
+    },
+    "storageAccount": {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2025-06-01",
+      "name": "[variables('storageAccountName')]",
+      "location": "[resourceGroup().location]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "properties": {
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": true,
+        "minimumTlsVersion": "TLS1_2"
+      }
+    },
+    "fileService": {
+      "type": "Microsoft.Storage/storageAccounts/fileServices",
+      "apiVersion": "2025-06-01",
+      "name": "[format('{0}/{1}', variables('storageAccountName'), 'default')]",
+      "dependsOn": [
+        "storageAccount"
+      ]
+    },
+    "seedFileShare": {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2025-06-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageAccountName'), 'default', 'seed')]",
+      "properties": {
+        "accessTier": "TransactionOptimized",
+        "enabledProtocols": "SMB",
+        "shareQuota": 5
+      },
+      "dependsOn": [
+        "fileService"
+      ]
+    },
+    "imagesFileShare": {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2025-06-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageAccountName'), 'default', 'images')]",
+      "properties": {
+        "accessTier": "TransactionOptimized",
+        "enabledProtocols": "SMB",
+        "shareQuota": 10
+      },
+      "dependsOn": [
+        "fileService"
+      ]
+    },
+    "managedEnvironment": {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2025-01-01",
+      "name": "[variables('managedEnvironmentName')]",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "workloadProfiles": [
+          {
+            "name": "[variables('workloadProfileName')]",
+            "workloadProfileType": "Consumption"
+          }
+        ]
+      }
+    },
+    "seedEnvironmentStorage": {
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2025-01-01",
+      "name": "[format('{0}/{1}', variables('managedEnvironmentName'), 'seed-storage')]",
+      "properties": {
+        "azureFile": {
+          "accountName": "[variables('storageAccountName')]",
+          "accountKey": "[listKeys('storageAccount', '2025-06-01').keys[0].value]",
+          "shareName": "seed",
+          "accessMode": "ReadOnly"
+        }
+      },
+      "dependsOn": [
+        "managedEnvironment",
+        "seedFileShare",
+        "storageAccount"
+      ]
+    },
+    "imagesEnvironmentStorage": {
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2025-01-01",
+      "name": "[format('{0}/{1}', variables('managedEnvironmentName'), 'images-storage')]",
+      "properties": {
+        "azureFile": {
+          "accountName": "[variables('storageAccountName')]",
+          "accountKey": "[listKeys('storageAccount', '2025-06-01').keys[0].value]",
+          "shareName": "images",
+          "accessMode": "ReadOnly"
+        }
+      },
+      "dependsOn": [
+        "imagesFileShare",
+        "managedEnvironment",
+        "storageAccount"
+      ]
+    },
+    "containerApp": {
+      "condition": "[parameters('deployContainerApp')]",
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2025-01-01",
+      "name": "[variables('containerAppName')]",
+      "location": "[resourceGroup().location]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'mh-catalog-identity'))]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('managedEnvironmentName'))]",
+        "workloadProfileName": "[variables('workloadProfileName')]",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": true,
+            "targetPort": 8080,
+            "transport": "auto",
+            "allowInsecure": false
+          },
+          "registries": [
+            {
+              "server": "[reference('containerRegistry').loginServer]",
+              "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'mh-catalog-identity')]"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "database-password",
+              "value": "[parameters('administratorLoginPassword')]"
+            },
+            {
+              "name": "performance-api-key",
+              "value": "[parameters('performanceApiKey')]"
+            }
+          ]
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "catalog",
+              "image": "[format('{0}/{1}', reference('containerRegistry').loginServer, parameters('containerImageName'))]",
+              "resources": {
+                "cpu": "[json('0.5')]",
+                "memory": "1Gi"
+              },
+              "env": [
+                {
+                  "name": "CATALOG_DATABASE_HOST",
+                  "value": "[reference('postgresqlServer').fullyQualifiedDomainName]"
+                },
+                {
+                  "name": "CATALOG_DATABASE_PORT",
+                  "value": "5432"
+                },
+                {
+                  "name": "CATALOG_DATABASE_NAME",
+                  "value": "postgres"
+                },
+                {
+                  "name": "CATALOG_DATABASE_USERNAME",
+                  "value": "[parameters('administratorLogin')]"
+                },
+                {
+                  "name": "CATALOG_DATABASE_PASSWORD",
+                  "secretRef": "database-password"
+                },
+                {
+                  "name": "CATALOG_DATABASE_SSL_MODE",
+                  "value": "require"
+                },
+                {
+                  "name": "CATALOG_IMAGES_PATH",
+                  "value": "/mnt/images"
+                },
+                {
+                  "name": "CATALOG_SEED_PATH",
+                  "value": "/mnt/seed/catalog.json"
+                },
+                {
+                  "name": "PERFTEST_API_KEY",
+                  "secretRef": "performance-api-key"
+                },
+                {
+                  "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+                  "value": "[parameters('otelExporterOtlpEndpoint')]"
+                },
+                {
+                  "name": "OTEL_SERVICE_VERSION",
+                  "value": "[parameters('containerImageName')]"
+                },
+                {
+                  "name": "DEPLOYMENT_ENVIRONMENT",
+                  "value": "lab"
+                },
+                {
+                  "name": "OTEL_SDK_DISABLED",
+                  "value": "true"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "volumeName": "seed-volume",
+                  "mountPath": "/mnt/seed"
+                },
+                {
+                  "volumeName": "images-volume",
+                  "mountPath": "/mnt/images"
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 0,
+            "maxReplicas": 3,
+            "rules": [
+              {
+                "name": "http-scaling-rule",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "50"
+                  }
+                }
+              }
+            ]
+          },
+          "volumes": [
+            {
+              "name": "seed-volume",
+              "storageType": "AzureFile",
+              "storageName": "seed-storage"
+            },
+            {
+              "name": "images-volume",
+              "storageType": "AzureFile",
+              "storageName": "images-storage"
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "acrPullRoleAssignment",
+        "containerAppIdentity",
+        "containerRegistry",
+        "imagesEnvironmentStorage",
+        "managedEnvironment",
+        "postgresqlServer",
+        "seedEnvironmentStorage"
+      ]
+    },
+    "loadTest": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('loadTest-{0}', uniqueString('loadTest', deployment().name))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[variables('loadTestName')]"
+          },
+          "location": {
+            "value": "[resourceGroup().location]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "languageVersion": "2.0",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.38.33.27573",
+              "templateHash": "6855377978478977654"
+            },
+            "name": "Load Testing Service",
+            "description": "This module deploys a Load test."
+          },
+          "definitions": {
+            "customerManagedKeyType": {
+              "type": "object",
+              "properties": {
+                "keyVaultResourceId": {
+                  "type": "string",
+                  "metadata": {
+                    "description": "Required. The resource ID of a key vault to reference a customer managed key for encryption from."
+                  }
+                },
+                "keyName": {
+                  "type": "string",
+                  "metadata": {
+                    "description": "Required. The name of the customer managed key to use for encryption."
+                  }
+                },
+                "keyVersion": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. The version of the customer managed key to reference for encryption. If not provided, the deployment will use the latest version available at deployment time."
+                  }
+                },
+                "userAssignedIdentityResourceId": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. User assigned identity to use when fetching the customer managed key. Required if no system assigned identity is available for use."
+                  }
+                }
+              },
+              "metadata": {
+                "description": "An AVM-aligned type for a customer-managed key. To be used if the resource type does not support auto-rotation of the customer-managed key.",
+                "__bicep_imported_from!": {
+                  "sourceTemplate": "br:mcr.microsoft.com/bicep/avm/utl/types/avm-common-types:0.4.0"
+                }
+              }
+            },
+            "lockType": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. Specify the name of lock."
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "allowedValues": [
+                    "CanNotDelete",
+                    "None",
+                    "ReadOnly"
+                  ],
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. Specify the type of lock."
+                  }
+                },
+                "notes": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. Specify the notes of the lock."
+                  }
+                }
+              },
+              "metadata": {
+                "description": "An AVM-aligned type for a lock.",
+                "__bicep_imported_from!": {
+                  "sourceTemplate": "br:mcr.microsoft.com/bicep/avm/utl/types/avm-common-types:0.6.0"
+                }
+              }
+            },
+            "managedIdentityAllType": {
+              "type": "object",
+              "properties": {
+                "systemAssigned": {
+                  "type": "bool",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. Enables system assigned managed identity on the resource."
+                  }
+                },
+                "userAssignedResourceIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. The resource ID(s) to assign to the resource. Required if a user assigned identity is used for encryption."
+                  }
+                }
+              },
+              "metadata": {
+                "description": "An AVM-aligned type for a managed identity configuration. To be used if both a system-assigned & user-assigned identities are supported by the resource provider.",
+                "__bicep_imported_from!": {
+                  "sourceTemplate": "br:mcr.microsoft.com/bicep/avm/utl/types/avm-common-types:0.4.0"
+                }
+              }
+            },
+            "roleAssignmentType": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. The name (as GUID) of the role assignment. If not provided, a GUID will be generated."
+                  }
+                },
+                "roleDefinitionIdOrName": {
+                  "type": "string",
+                  "metadata": {
+                    "description": "Required. The role to assign. You can provide either the display name of the role definition, the role definition GUID, or its fully qualified ID in the following format: '/providers/Microsoft.Authorization/roleDefinitions/c2f4ef07-c644-48eb-af81-4b1b4947fb11'."
+                  }
+                },
+                "principalId": {
+                  "type": "string",
+                  "metadata": {
+                    "description": "Required. The principal ID of the principal (user/group/identity) to assign the role to."
+                  }
+                },
+                "principalType": {
+                  "type": "string",
+                  "allowedValues": [
+                    "Device",
+                    "ForeignGroup",
+                    "Group",
+                    "ServicePrincipal",
+                    "User"
+                  ],
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. The principal type of the assigned principal ID."
+                  }
+                },
+                "description": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. The description of the role assignment."
+                  }
+                },
+                "condition": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. The conditions on the role assignment. This limits the resources it can be assigned to. e.g.: @Resource[Microsoft.Storage/storageAccounts/blobServices/containers:ContainerName] StringEqualsIgnoreCase \"foo_storage_container\"."
+                  }
+                },
+                "conditionVersion": {
+                  "type": "string",
+                  "allowedValues": [
+                    "2.0"
+                  ],
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. Version of the condition."
+                  }
+                },
+                "delegatedManagedIdentityResourceId": {
+                  "type": "string",
+                  "nullable": true,
+                  "metadata": {
+                    "description": "Optional. The Resource Id of the delegated managed identity resource."
+                  }
+                }
+              },
+              "metadata": {
+                "description": "An AVM-aligned type for a role assignment.",
+                "__bicep_imported_from!": {
+                  "sourceTemplate": "br:mcr.microsoft.com/bicep/avm/utl/types/avm-common-types:0.4.0"
+                }
+              }
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Required. Name of the Load test."
+              }
+            },
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]",
+              "metadata": {
+                "description": "Optional. Location for all resources."
+              }
+            },
+            "lock": {
+              "$ref": "#/definitions/lockType",
+              "nullable": true,
+              "metadata": {
+                "description": "Optional. The lock settings of the service."
+              }
+            },
+            "roleAssignments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/roleAssignmentType"
+              },
+              "nullable": true,
+              "metadata": {
+                "description": "Optional. Array of role assignments to create."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "__bicep_resource_derived_type!": {
+                  "source": "Microsoft.LoadTestService/loadTests@2022-12-01#properties/tags"
+                },
+                "description": "Optional. Resource tags."
+              },
+              "nullable": true
+            },
+            "managedIdentities": {
+              "$ref": "#/definitions/managedIdentityAllType",
+              "nullable": true,
+              "metadata": {
+                "description": "Optional. The managed identity definition for this resource."
+              }
+            },
+            "enableTelemetry": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Optional. Enable/Disable usage telemetry for module."
+              }
+            },
+            "loadTestDescription": {
+              "type": "string",
+              "nullable": true,
+              "metadata": {
+                "description": "Optional. The description of the load test."
+              }
+            },
+            "customerManagedKey": {
+              "$ref": "#/definitions/customerManagedKeyType",
+              "nullable": true,
+              "metadata": {
+                "description": "Optional. The customer managed key definition."
+              }
+            }
+          },
+          "variables": {
+            "copy": [
+              {
+                "name": "formattedRoleAssignments",
+                "count": "[length(coalesce(parameters('roleAssignments'), createArray()))]",
+                "input": "[union(coalesce(parameters('roleAssignments'), createArray())[copyIndex('formattedRoleAssignments')], createObject('roleDefinitionId', coalesce(tryGet(variables('builtInRoleNames'), coalesce(parameters('roleAssignments'), createArray())[copyIndex('formattedRoleAssignments')].roleDefinitionIdOrName), if(contains(coalesce(parameters('roleAssignments'), createArray())[copyIndex('formattedRoleAssignments')].roleDefinitionIdOrName, '/providers/Microsoft.Authorization/roleDefinitions/'), coalesce(parameters('roleAssignments'), createArray())[copyIndex('formattedRoleAssignments')].roleDefinitionIdOrName, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', coalesce(parameters('roleAssignments'), createArray())[copyIndex('formattedRoleAssignments')].roleDefinitionIdOrName)))))]"
+              }
+            ],
+            "formattedUserAssignedIdentities": "[reduce(map(coalesce(tryGet(parameters('managedIdentities'), 'userAssignedResourceIds'), createArray()), lambda('id', createObject(format('{0}', lambdaVariables('id')), createObject()))), createObject(), lambda('cur', 'next', union(lambdaVariables('cur'), lambdaVariables('next'))))]",
+            "identity": "[if(not(empty(parameters('managedIdentities'))), createObject('type', if(coalesce(tryGet(parameters('managedIdentities'), 'systemAssigned'), false()), if(not(empty(coalesce(tryGet(parameters('managedIdentities'), 'userAssignedResourceIds'), createObject()))), 'SystemAssigned,UserAssigned', 'SystemAssigned'), if(not(empty(coalesce(tryGet(parameters('managedIdentities'), 'userAssignedResourceIds'), createObject()))), 'UserAssigned', 'None')), 'userAssignedIdentities', if(not(empty(variables('formattedUserAssignedIdentities'))), variables('formattedUserAssignedIdentities'), null())), null())]",
+            "builtInRoleNames": {
+              "Contributor": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+              "Owner": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '8e3af657-a8ff-443c-a75c-2fe8c4bcb635')]",
+              "Reader": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')]",
+              "Role Based Access Control Administrator": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'f58310d9-a9f6-439a-9e8d-f62e7b41a168')]",
+              "User Access Administrator": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9')]"
+            }
+          },
+          "resources": {
+            "cMKKeyVault::cMKKey": {
+              "condition": "[and(not(empty(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'))), and(not(empty(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'))), not(empty(tryGet(parameters('customerManagedKey'), 'keyName')))))]",
+              "existing": true,
+              "type": "Microsoft.KeyVault/vaults/keys",
+              "apiVersion": "2023-02-01",
+              "subscriptionId": "[split(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'), '/')[2]]",
+              "resourceGroup": "[split(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'), '/')[4]]",
+              "name": "[format('{0}/{1}', last(split(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'), '/')), tryGet(parameters('customerManagedKey'), 'keyName'))]"
+            },
+            "loadTest_lock": {
+              "condition": "[and(not(empty(coalesce(parameters('lock'), createObject()))), not(equals(tryGet(parameters('lock'), 'kind'), 'None')))]",
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[format('Microsoft.LoadTestService/loadTests/{0}', parameters('name'))]",
+              "name": "[coalesce(tryGet(parameters('lock'), 'name'), format('lock-{0}', parameters('name')))]",
+              "properties": {
+                "level": "[coalesce(tryGet(parameters('lock'), 'kind'), '')]",
+                "notes": "[coalesce(tryGet(parameters('lock'), 'notes'), if(equals(tryGet(parameters('lock'), 'kind'), 'CanNotDelete'), 'Cannot delete resource or child resources.', 'Cannot delete or modify the resource or child resources.'))]"
+              },
+              "dependsOn": [
+                "loadTest"
+              ]
+            },
+            "avmTelemetry": {
+              "condition": "[parameters('enableTelemetry')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2024-03-01",
+              "name": "[format('46d3xbcp.res.loadtestservice-loadtest.{0}.{1}', replace('0.4.3', '.', '-'), substring(uniqueString(deployment().name, parameters('location')), 0, 4))]",
+              "properties": {
+                "mode": "Incremental",
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "resources": [],
+                  "outputs": {
+                    "telemetry": {
+                      "type": "String",
+                      "value": "For more information, see https://aka.ms/avm/TelemetryInfo"
+                    }
+                  }
+                }
+              }
+            },
+            "cMKKeyVault": {
+              "condition": "[not(empty(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId')))]",
+              "existing": true,
+              "type": "Microsoft.KeyVault/vaults",
+              "apiVersion": "2023-02-01",
+              "subscriptionId": "[split(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'), '/')[2]]",
+              "resourceGroup": "[split(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'), '/')[4]]",
+              "name": "[last(split(tryGet(parameters('customerManagedKey'), 'keyVaultResourceId'), '/'))]"
+            },
+            "cMKUserAssignedIdentity": {
+              "condition": "[not(empty(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId')))]",
+              "existing": true,
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "subscriptionId": "[split(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId'), '/')[2]]",
+              "resourceGroup": "[split(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId'), '/')[4]]",
+              "name": "[last(split(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId'), '/'))]"
+            },
+            "loadTest": {
+              "type": "Microsoft.LoadTestService/loadTests",
+              "apiVersion": "2022-12-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "identity": "[variables('identity')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "description": "[parameters('loadTestDescription')]",
+                "encryption": "[if(not(empty(parameters('customerManagedKey'))), createObject('identity', createObject('type', 'UserAssigned', 'resourceId', if(not(empty(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId'))), extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', split(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId'), '/')[2], split(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId'), '/')[4]), 'Microsoft.ManagedIdentity/userAssignedIdentities', last(split(tryGet(parameters('customerManagedKey'), 'userAssignedIdentityResourceId'), '/'))), null())), 'keyUrl', if(not(empty(tryGet(parameters('customerManagedKey'), 'keyVersion'))), format('{0}/{1}', reference('cMKKeyVault::cMKKey').keyUri, parameters('customerManagedKey').keyVersion), reference('cMKKeyVault::cMKKey').keyUriWithVersion)), null())]"
+              },
+              "dependsOn": [
+                "cMKKeyVault::cMKKey"
+              ]
+            },
+            "loadTest_roleAssignments": {
+              "copy": {
+                "name": "loadTest_roleAssignments",
+                "count": "[length(coalesce(variables('formattedRoleAssignments'), createArray()))]"
+              },
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[format('Microsoft.LoadTestService/loadTests/{0}', parameters('name'))]",
+              "name": "[coalesce(tryGet(coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()], 'name'), guid(resourceId('Microsoft.LoadTestService/loadTests', parameters('name')), coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()].principalId, coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()].roleDefinitionId))]",
+              "properties": {
+                "roleDefinitionId": "[coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()].roleDefinitionId]",
+                "principalId": "[coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()].principalId]",
+                "description": "[tryGet(coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()], 'description')]",
+                "principalType": "[tryGet(coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()], 'principalType')]",
+                "condition": "[tryGet(coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()], 'condition')]",
+                "conditionVersion": "[if(not(empty(tryGet(coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()], 'condition'))), coalesce(tryGet(coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()], 'conditionVersion'), '2.0'), null())]",
+                "delegatedManagedIdentityResourceId": "[tryGet(coalesce(variables('formattedRoleAssignments'), createArray())[copyIndex()], 'delegatedManagedIdentityResourceId')]"
+              },
+              "dependsOn": [
+                "loadTest"
+              ]
+            }
+          },
+          "outputs": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "The name of the load test."
+              },
+              "value": "[parameters('name')]"
+            },
+            "resourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "The resource ID of the load test."
+              },
+              "value": "[resourceId('Microsoft.LoadTestService/loadTests', parameters('name'))]"
+            },
+            "resourceGroupName": {
+              "type": "string",
+              "metadata": {
+                "description": "The resource group the load test was deployed into."
+              },
+              "value": "[resourceGroup().name]"
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "The location the resource was deployed into."
+              },
+              "value": "[reference('loadTest', '2022-12-01', 'full').location]"
+            },
+            "systemAssignedMIPrincipalId": {
+              "type": "string",
+              "nullable": true,
+              "metadata": {
+                "description": "The principal ID of the system assigned identity."
+              },
+              "value": "[tryGet(tryGet(reference('loadTest', '2022-12-01', 'full'), 'identity'), 'principalId')]"
+            }
+          }
+        }
+      }
+    }
+  },
+  "outputs": {
+    "serverName": {
+      "type": "string",
+      "value": "[variables('serverName')]"
+    },
+    "serverFqdn": {
+      "type": "string",
+      "value": "[reference('postgresqlServer').fullyQualifiedDomainName]"
+    },
+    "containerRegistryName": {
+      "type": "string",
+      "value": "[variables('containerRegistryName')]"
+    },
+    "containerRegistryLoginServer": {
+      "type": "string",
+      "value": "[reference('containerRegistry').loginServer]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[variables('storageAccountName')]"
+    },
+    "seedFileShareName": {
+      "type": "string",
+      "value": "seed"
+    },
+    "imagesFileShareName": {
+      "type": "string",
+      "value": "images"
+    },
+    "containerAppUrl": {
+      "type": "string",
+      "value": "[if(empty(coalesce(tryGet(tryGet(tryGet(tryGet(if(parameters('deployContainerApp'), reference('containerApp', '2025-01-01', 'full'), null()), 'properties'), 'configuration'), 'ingress'), 'fqdn'), '')), '', format('https://{0}', coalesce(tryGet(tryGet(tryGet(tryGet(if(parameters('deployContainerApp'), reference('containerApp', '2025-01-01', 'full'), null()), 'properties'), 'configuration'), 'ingress'), 'fqdn'), '')))]"
+    },
+    "loadTestName": {
+      "type": "string",
+      "value": "[variables('loadTestName')]"
+    },
+    "githubActionsIdentityClientId": {
+      "type": "string",
+      "value": "[reference('githubActionsIdentity').clientId]"
+    },
+    "githubActionsIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference('githubActionsIdentity').principalId]"
+    }
+  }
+}
