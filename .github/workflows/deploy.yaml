@@ -30,6 +30,7 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+
       - name: Build and push image
         env:
           ACR_NAME: ${{ vars.ACR_NAME }}
