@@ -38,9 +38,6 @@ param containerImageName string = 'lego-catalog/app:latest'
 @secure()
 param performanceApiKey string
 
-@description('OpenTelemetry OTLP endpoint used by the application.')
-param otelExporterOtlpEndpoint string = 'http://localhost:4317'
-
 @description('Deploy the Container App after its image and data are available.')
 param deployContainerApp bool = true
 
@@ -53,6 +50,8 @@ var storageAccountName = 'mhcatalog${uniqueString(resourceGroup().id)}'
 var managedEnvironmentName = 'mh-catalog-environment'
 var containerAppName = 'mh-catalog'
 var loadTestName = 'mh-loadtest-${uniqueString(resourceGroup().id)}'
+var logAnalyticsWorkspaceName = 'mh-catalog-logs-${uniqueString(resourceGroup().id)}'
+var applicationInsightsName = 'mh-catalog-insights-${uniqueString(resourceGroup().id)}'
 var workloadProfileName = 'Consumption'
 var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var contributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')
@@ -215,7 +214,29 @@ resource imagesFileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@
   }
 }
 
-resource managedEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+  name: logAnalyticsWorkspaceName
+  location: resourceGroup().location
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+    retentionInDays: 30
+  }
+}
+
+resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: applicationInsightsName
+  location: resourceGroup().location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalyticsWorkspace.id
+    DisableLocalAuth: false
+  }
+}
+
+resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
   name: managedEnvironmentName
   location: resourceGroup().location
   properties: {
@@ -225,6 +246,21 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
         workloadProfileType: 'Consumption'
       }
     ]
+    appInsightsConfiguration: {
+      connectionString: applicationInsights.properties.ConnectionString
+    }
+    openTelemetryConfiguration: {
+      tracesConfiguration: {
+        destinations: [
+          'appInsights'
+        ]
+      }
+      logsConfiguration: {
+        destinations: [
+          'appInsights'
+        ]
+      }
+    }
   }
 }
 
@@ -338,10 +374,6 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployConta
               secretRef: 'performance-api-key'
             }
             {
-              name: 'OTEL_EXPORTER_OTLP_ENDPOINT'
-              value: otelExporterOtlpEndpoint
-            }
-            {
               name: 'OTEL_SERVICE_VERSION'
               value: containerImageName
             }
@@ -350,8 +382,8 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployConta
               value: 'lab'
             }
             {
-              name: 'OTEL_SDK_DISABLED'
-              value: 'true'
+              name: 'OTEL_METRICS_EXPORTER'
+              value: 'none'
             }
           ]
           volumeMounts: [
@@ -415,5 +447,7 @@ output seedFileShareName string = seedFileShare.name
 output imagesFileShareName string = imagesFileShare.name
 output containerAppUrl string = empty(containerAppFqdn) ? '' : 'https://${containerAppFqdn}'
 output loadTestName string = loadTestName
+output logAnalyticsWorkspaceName string = logAnalyticsWorkspace.name
+output applicationInsightsName string = applicationInsights.name
 output githubActionsIdentityClientId string = githubActionsIdentity.properties.clientId
 output githubActionsIdentityPrincipalId string = githubActionsIdentity.properties.principalId

@@ -1,5 +1,23 @@
 # Implementation log
 
+## 2026-09-24 - Container Apps managed OpenTelemetry export
+
+- Add a PerGB2018 Log Analytics workspace with 30-day retention and link a
+  workspace-based Application Insights component to it.
+- Configure the Container Apps environment's managed OpenTelemetry agent to export
+  application traces and logs to Application Insights. Keep Application Insights
+  local authentication enabled because the managed agent requires its connection
+  string.
+- Use the documented `2024-10-02-preview` managed-environment API because the stable
+  `2025-01-01` Bicep type doesn't expose the managed OpenTelemetry configuration.
+- Let Container Apps inject the OTLP/gRPC endpoint and protocol instead of overriding
+  them with the former localhost endpoint, and enable the application's existing
+  OpenTelemetry SDK by removing `OTEL_SDK_DISABLED`.
+- Disable only the OTLP metrics exporter because Application Insights isn't a supported
+  metrics destination for the managed agent.
+- Document how to query exported requests, dependencies, and application logs after
+  deployment.
+
 ## 2026-09-24 - template-aligned workshop layout
 
 - Flatten challenge guides to `challenges/<challenge>.md`, with the two ch01-A stack

@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "7957621034359746881"
+      "templateHash": "553221248984132360"
     }
   },
   "parameters": {
@@ -74,13 +74,6 @@
         "description": "API key required by the performance test endpoint."
       }
     },
-    "otelExporterOtlpEndpoint": {
-      "type": "string",
-      "defaultValue": "http://localhost:4317",
-      "metadata": {
-        "description": "OpenTelemetry OTLP endpoint used by the application."
-      }
-    },
     "deployContainerApp": {
       "type": "bool",
       "defaultValue": true,
@@ -102,6 +95,8 @@
     "managedEnvironmentName": "mh-catalog-environment",
     "containerAppName": "mh-catalog",
     "loadTestName": "[format('mh-loadtest-{0}', uniqueString(resourceGroup().id))]",
+    "logAnalyticsWorkspaceName": "[format('mh-catalog-logs-{0}', uniqueString(resourceGroup().id))]",
+    "applicationInsightsName": "[format('mh-catalog-insights-{0}', uniqueString(resourceGroup().id))]",
     "workloadProfileName": "Consumption",
     "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
     "contributorRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]"
@@ -203,6 +198,38 @@
         "githubActionsIdentity"
       ]
     },
+    "githubStagingFederatedCredential": {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+      "apiVersion": "2024-11-30",
+      "name": "[format('{0}/{1}', 'mh-github-actions-identity', 'github-staging')]",
+      "properties": {
+        "audiences": [
+          "api://AzureADTokenExchange"
+        ],
+        "issuer": "https://token.actions.githubusercontent.com",
+        "subject": "[format('repo:{0}:environment:staging', parameters('githubRepository'))]"
+      },
+      "dependsOn": [
+        "githubActionsIdentity",
+        "githubMainFederatedCredential"
+      ]
+    },
+    "githubProductionFederatedCredential": {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+      "apiVersion": "2024-11-30",
+      "name": "[format('{0}/{1}', 'mh-github-actions-identity', 'github-production')]",
+      "properties": {
+        "audiences": [
+          "api://AzureADTokenExchange"
+        ],
+        "issuer": "https://token.actions.githubusercontent.com",
+        "subject": "[format('repo:{0}:environment:production', parameters('githubRepository'))]"
+      },
+      "dependsOn": [
+        "githubActionsIdentity",
+        "githubStagingFederatedCredential"
+      ]
+    },
     "githubActionsContributorRoleAssignment": {
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
@@ -265,9 +292,36 @@
         "fileService"
       ]
     },
+    "logAnalyticsWorkspace": {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('logAnalyticsWorkspaceName')]",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    "applicationInsights": {
+      "type": "Microsoft.Insights/components",
+      "apiVersion": "2020-02-02",
+      "name": "[variables('applicationInsightsName')]",
+      "location": "[resourceGroup().location]",
+      "kind": "web",
+      "properties": {
+        "Application_Type": "web",
+        "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsWorkspaceName'))]",
+        "DisableLocalAuth": false
+      },
+      "dependsOn": [
+        "logAnalyticsWorkspace"
+      ]
+    },
     "managedEnvironment": {
       "type": "Microsoft.App/managedEnvironments",
-      "apiVersion": "2025-01-01",
+      "apiVersion": "2024-10-02-preview",
       "name": "[variables('managedEnvironmentName')]",
       "location": "[resourceGroup().location]",
       "properties": {
@@ -276,8 +330,26 @@
             "name": "[variables('workloadProfileName')]",
             "workloadProfileType": "Consumption"
           }
-        ]
-      }
+        ],
+        "appInsightsConfiguration": {
+          "connectionString": "[reference('applicationInsights').ConnectionString]"
+        },
+        "openTelemetryConfiguration": {
+          "tracesConfiguration": {
+            "destinations": [
+              "appInsights"
+            ]
+          },
+          "logsConfiguration": {
+            "destinations": [
+              "appInsights"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "applicationInsights"
+      ]
     },
     "seedEnvironmentStorage": {
       "type": "Microsoft.App/managedEnvironments/storages",
@@ -331,7 +403,7 @@
         "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('managedEnvironmentName'))]",
         "workloadProfileName": "[variables('workloadProfileName')]",
         "configuration": {
-          "activeRevisionsMode": "Single",
+          "activeRevisionsMode": "Multiple",
           "ingress": {
             "external": true,
             "targetPort": 8080,
@@ -402,10 +474,6 @@
                   "secretRef": "performance-api-key"
                 },
                 {
-                  "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
-                  "value": "[parameters('otelExporterOtlpEndpoint')]"
-                },
-                {
                   "name": "OTEL_SERVICE_VERSION",
                   "value": "[parameters('containerImageName')]"
                 },
@@ -414,8 +482,8 @@
                   "value": "lab"
                 },
                 {
-                  "name": "OTEL_SDK_DISABLED",
-                  "value": "true"
+                  "name": "OTEL_METRICS_EXPORTER",
+                  "value": "none"
                 }
               ],
               "volumeMounts": [
@@ -943,6 +1011,14 @@
     "loadTestName": {
       "type": "string",
       "value": "[variables('loadTestName')]"
+    },
+    "logAnalyticsWorkspaceName": {
+      "type": "string",
+      "value": "[variables('logAnalyticsWorkspaceName')]"
+    },
+    "applicationInsightsName": {
+      "type": "string",
+      "value": "[variables('applicationInsightsName')]"
     },
     "githubActionsIdentityClientId": {
       "type": "string",
