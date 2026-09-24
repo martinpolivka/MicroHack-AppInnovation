@@ -13,8 +13,8 @@ permissions:
   id-token: write
 
 env:
-  CONTAINER_APP_NAME: lego-catalog-app
-  IMAGE_NAME: lego-catalog-app
+  CONTAINER_APP_NAME: mh-catalog
+  IMAGE_NAME: lego-catalog/app
 
 jobs:
   deploy:
