@@ -6,4 +6,4 @@ param administratorLoginPassword = readEnvironmentVariable('POSTGRES_ADMIN_PASSW
 param performanceApiKey = readEnvironmentVariable('PERFTEST_API_KEY')
 param clientIpAddress = '203.0.113.10'
 param postgresqlVersion = '16'
-param githubRepository = 'martinpolivka/MicroHack-AppInnovation'
+param githubRepository = 'martinpolivka@9105423/MicroHack-AppInnovation@1355931296'

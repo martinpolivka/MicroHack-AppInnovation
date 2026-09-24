@@ -12,13 +12,24 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: deploy-java-catalog
+  cancel-in-progress: false
+
 env:
   CONTAINER_APP_NAME: mh-catalog
   IMAGE_NAME: lego-catalog/app
 
 jobs:
-  deploy:
+  deploy_staging:
+    name: Deploy staging revision
     runs-on: ubuntu-24.04
+    environment:
+      name: staging
+      url: ${{ steps.deploy.outputs.revision_url }}
+    outputs:
+      revision_name: ${{ steps.deploy.outputs.revision_name }}
+      revision_url: ${{ steps.deploy.outputs.revision_url }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -29,7 +40,6 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
 
       - name: Build and push image
         env:
@@ -42,16 +52,134 @@ jobs:
           docker build --tag "$IMAGE" java
           docker push "$IMAGE"
 
-      - name: Deploy image to Azure Container Apps
+      - name: Deploy revision with no traffic
+        id: deploy
         env:
           ACR_NAME: ${{ vars.ACR_NAME }}
           IMAGE_TAG: ${{ github.run_id }}
           RESOURCE_GROUP_NAME: ${{ vars.RESOURCE_GROUP_NAME }}
+          REVISION_SUFFIX: r${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -Eeuo pipefail
           IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
-          az containerapp update \
+          REVISION_NAME="${CONTAINER_APP_NAME}--${REVISION_SUFFIX}"
+
+          CURRENT_LATEST_REVISION=$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP_NAME" \
+            --query properties.latestReadyRevisionName \
+            --output tsv)
+
+          mapfile -t CURRENT_TRAFFIC < <(
+            az containerapp show \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "$RESOURCE_GROUP_NAME" \
+              --output json |
+              jq -r --arg latest "$CURRENT_LATEST_REVISION" '
+                [
+                  .properties.configuration.ingress.traffic[]
+                  | select(.weight > 0)
+                  | {
+                      revision: (if .latestRevision then $latest else .revisionName end),
+                      weight: .weight
+                    }
+                ]
+                | group_by(.revision)[]
+                | "\(.[0].revision)=\(map(.weight) | add)"
+              '
+          )
+
+          if (( ${#CURRENT_TRAFFIC[@]} == 0 )); then
+            echo "::error::The Container App has no existing traffic allocation to preserve."
+            exit 1
+          fi
+
+          az containerapp ingress traffic set \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP_NAME" \
+            --revision-weight "${CURRENT_TRAFFIC[@]}" \
+            --output none
+
+          az containerapp revision copy \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$RESOURCE_GROUP_NAME" \
             --image "$IMAGE" \
+            --revision-suffix "$REVISION_SUFFIX" \
             --output none
+
+          REVISION_URL=$(az containerapp revision show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP_NAME" \
+            --revision "$REVISION_NAME" \
+            --query properties.fqdn \
+            --output tsv)
+
+          if [[ -z "$REVISION_URL" ]]; then
+            echo "::error::Azure did not return an FQDN for revision $REVISION_NAME."
+            exit 1
+          fi
+
+          REVISION_URL="https://${REVISION_URL}"
+          echo "revision_name=$REVISION_NAME" >> "$GITHUB_OUTPUT"
+          echo "revision_url=$REVISION_URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Staging revision"
+            echo
+            echo "- Revision: \`$REVISION_NAME\`"
+            echo "- Test URL: $REVISION_URL"
+            echo "- Production traffic: unchanged"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote_production:
+    name: Approve and promote production
+    needs: deploy_staging
+    runs-on: ubuntu-24.04
+    environment:
+      name: production
+      url: ${{ needs.deploy_staging.outputs.revision_url }}
+    steps:
+      - name: Sign in to Azure
+        uses: azure/login@eec3c95657c1536435858eda1f3ff5437fee8474
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Promote revision and deactivate previous revisions
+        env:
+          RESOURCE_GROUP_NAME: ${{ vars.RESOURCE_GROUP_NAME }}
+          REVISION_NAME: ${{ needs.deploy_staging.outputs.revision_name }}
+          REVISION_URL: ${{ needs.deploy_staging.outputs.revision_url }}
+        run: |
+          set -Eeuo pipefail
+
+          az containerapp ingress traffic set \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP_NAME" \
+            --revision-weight "${REVISION_NAME}=100" \
+            --output none
+
+          mapfile -t PREVIOUS_REVISIONS < <(
+            az containerapp revision list \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "$RESOURCE_GROUP_NAME" \
+              --query "[?name != '${REVISION_NAME}'].name" \
+              --output tsv
+          )
+
+          for revision in "${PREVIOUS_REVISIONS[@]}"; do
+            az containerapp revision deactivate \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "$RESOURCE_GROUP_NAME" \
+              --revision "$revision" \
+              --output none
+          done
+
+          {
+            echo "## Production promotion"
+            echo
+            echo "- Revision: \`$REVISION_NAME\`"
+            echo "- Revision URL: $REVISION_URL"
+            echo "- Traffic: 100%"
+            echo "- Previous active revisions: deactivated"
+          } >> "$GITHUB_STEP_SUMMARY"

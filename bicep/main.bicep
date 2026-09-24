@@ -136,6 +136,36 @@ resource githubMainFederatedCredential 'Microsoft.ManagedIdentity/userAssignedId
   }
 }
 
+resource githubStagingFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
+  parent: githubActionsIdentity
+  name: 'github-staging'
+  properties: {
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+    issuer: 'https://token.actions.githubusercontent.com'
+    subject: 'repo:${githubRepository}:environment:staging'
+  }
+  dependsOn: [
+    githubMainFederatedCredential
+  ]
+}
+
+resource githubProductionFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
+  parent: githubActionsIdentity
+  name: 'github-production'
+  properties: {
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+    issuer: 'https://token.actions.githubusercontent.com'
+    subject: 'repo:${githubRepository}:environment:production'
+  }
+  dependsOn: [
+    githubStagingFederatedCredential
+  ]
+}
+
 resource githubActionsContributorRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(resourceGroup().id, githubActionsIdentity.id, contributorRoleDefinitionId)
   scope: resourceGroup()
@@ -237,7 +267,7 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployConta
     managedEnvironmentId: managedEnvironment.id
     workloadProfileName: workloadProfileName
     configuration: {
-      activeRevisionsMode: 'Single'
+      activeRevisionsMode: 'Multiple'
       ingress: {
         external: true
         targetPort: 8080

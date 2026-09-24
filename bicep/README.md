@@ -9,10 +9,10 @@ Azure Load Testing resource. The app uses a user-assigned managed identity with
 
 The template also creates a separate `mh-github-actions-identity` user-assigned
 identity for CI/CD. Its federated credential trusts GitHub's OIDC issuer only for
-the repository configured by `githubRepository` and the `main` branch. The
-identity receives the Contributor role at the current resource-group scope, so
-the workflow can push images and update the Container App without a stored Azure
-client secret.
+the repository configured by `githubRepository`. Separate subjects support the
+`main` branch and the `staging` and `production` GitHub environments. The identity
+receives the Contributor role at the current resource-group scope, so the workflow
+can push images and update the Container App without a stored Azure client secret.
 
 Set `containerRegistrySku` in `main.bicepparam` to `Standard` or `Premium` when
 the workload requires features beyond the default Basic tier.
@@ -93,6 +93,10 @@ az deployment group show \
    --query 'properties.outputs.{clientId:githubActionsIdentityClientId.value,principalId:githubActionsIdentityPrincipalId.value}'
 ```
 
-The federated subject is
-`repo:<owner>/<repository>:ref:refs/heads/main`. Manual workflow runs must also
-run from `main`; other branches do not match this credential.
+The simple workflow can use the
+`repo:<owner>/<repository>:ref:refs/heads/main` subject. The revision workflow uses
+`repo:<owner>/<repository>:environment:staging` while creating a zero-traffic revision
+and `repo:<owner>/<repository>:environment:production` while promoting it. Create both
+GitHub environments with those exact lowercase names and add required reviewers to
+`production`. Manual workflow runs can start from any branch when every Azure login job
+uses one of these environment-scoped credentials.
